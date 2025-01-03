@@ -8,52 +8,149 @@ from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress
 from rich import print as rprint
+import websockets
+import asyncio
+from PIL import Image
+from io import BytesIO
 
-class SwedenWeatherUI:
+class SMHIBaseService:
+    """Base class for all SMHI services"""
     def __init__(self):
-        self.base_url = "https://opendata-download-metobs.smhi.se/api"
         self.console = Console()
-        self.favorites = {}  # Initialize empty favorites dictionary
+        self.favorites = {}
+        self.load_favorites()
+
+    def save_favorites(self):
+        """Save favorites to a file."""
+        try:
+            with open('weather_favorites.json', 'w') as f:
+                json.dump(self.favorites, f)
+        except Exception as e:
+            self.console.print(f"[yellow]Could not save favorites: {e}[/yellow]")
+
+    def load_favorites(self):
+        """Load favorites from file."""
+        try:
+            with open('weather_favorites.json', 'r') as f:
+                self.favorites = json.load(f)
+        except FileNotFoundError:
+            self.favorites = {}
+        except Exception as e:
+            self.console.print(f"[yellow]Could not load favorites: {e}[/yellow]")
+            self.favorites = {}
+
+    def fetch_data(self, url: str, is_binary: bool = False) -> Dict:
+        """Fetch data from SMHI API."""
+        try:
+            self.console.print(f"[dim]Fetching URL: {url}[/dim]")
+            response = requests.get(url)
+            response.raise_for_status()
+            if is_binary:
+                return response.content
+            data = response.json()
+            self.console.print("[dim]Data fetched successfully[/dim]")
+            return data
+        except requests.RequestException as e:
+            self.console.print(f"[red]Error fetching data: {e}[/red]")
+            raise
+
+class SMHIMultiService:
+    """Main class handling multiple SMHI services"""
+    def __init__(self):
+        self.console = Console()
+        self.met_obs = MeteorologicalObservations()
+        self.met_forecast = MeteorologicalForecasts()
+        self.met_analysis = MeteorologicalAnalysis()
+        self.ocean_data = OceanographicData()
         
-        # Initialize parameters (existing code)
-        self.parameters = {
-            "1": {
-                "name": "Lufttemperatur momentanvärde, 1 gång/tim",
-                "id": "2",
-                "unit": "°C",
-                "description": "Temperature"
-            },
-            "2": {
-                "name": "Lufttryck reducerat havsytans nivå",
-                "id": "9",
-                "unit": "hPa",
-                "description": "Air pressure"
-            },
-            "3": {
-                "name": "Relativ Luftfuktighet momentanvärde, 1 gång/tim",
-                "id": "6",
-                "unit": "%",
-                "description": "Relative humidity"
-            },
-            "4": {
-                "name": "Nederbördsmängd summa 1 timme, 1 gång/tim",
-                "id": "7",
-                "unit": "mm",
-                "description": "Precipitation amount"
-            },
-            "5": {
-                "name": "Vindhastighet medelvärde 10 min, 1 gång/tim",
-                "id": "4",
-                "unit": "m/s",
-                "description": "Wind speed"
-            }
+        self.services = {
+            "1": ("Meteorological Observations", self.show_met_observations),
+            "2": ("Meteorological Forecasts", self.show_met_forecasts),
+            "3": ("Meteorological Analysis (MESAN)", self.show_met_analysis),
+            "4": ("Oceanographic Data", self.show_ocean_data),
         }
-        # Define available period types
-        self.period_types = [
-            "latest-hour",
-            "latest-day",
-            "latest-months"
-        ]
+
+    def display_main_menu(self) -> Optional[str]:
+        """Display main service selection menu"""
+        table = Table(title="SMHI Services")
+        table.add_column("Option", justify="right", style="cyan")
+        table.add_column("Service", style="green")
+        
+        for key, (service_name, _) in self.services.items():
+            table.add_row(key, service_name)
+            
+        self.console.print(table)
+        choice = input("\nSelect a service (1-4) or 'q' to quit: ")
+        return None if choice.lower() == 'q' else choice
+
+    def show_met_observations(self):
+        """Run the existing meteorological observations interface"""
+        self.met_obs.run()
+
+    async def show_met_forecasts(self):
+        """Handle meteorological forecast display"""
+        lat = float(input("Enter latitude (e.g. 59.3293): "))
+        lon = float(input("Enter longitude (e.g. 18.0686): "))
+        
+        with Progress() as progress:
+            task = progress.add_task("[cyan]Fetching forecast...", total=None)
+            forecast = await self.met_forecast.get_forecast(lat, lon)
+        
+        if forecast:
+            self.console.print("\n[bold green]Weather Forecast[/bold green]")
+            for time_series in forecast['timeSeries'][:24]:  # Next 24 hours
+                timestamp = datetime.fromisoformat(time_series['validTime'].replace('Z', '+00:00'))
+                temp = next(p['values'][0] for p in time_series['parameters'] if p['name'] == 't')
+                self.console.print(f"{timestamp.strftime('%Y-%m-%d %H:%M')}: {temp}°C")
+
+    async def show_met_analysis(self):
+        """Handle meteorological analysis display"""
+        await self.met_analysis.run_analysis()
+
+    def show_ocean_data(self):
+        """Handle oceanographic data display"""
+        stations = self.ocean_data.get_stations()
+        # Display stations and handle user selection...
+        pass
+
+    async def run(self):
+        """Main application loop"""
+        self.console.print("[bold blue]Welcome to SMHI Multi-Service Terminal UI[/bold blue]")
+        
+        while True:
+            choice = self.display_main_menu()
+            if choice is None:
+                break
+                
+            if choice in self.services:
+                service_name, handler = self.services[choice]
+                self.console.print(f"\n[bold green]Selected Service: {service_name}[/bold green]")
+                
+                if asyncio.iscoroutinefunction(handler):
+                    await handler()
+                else:
+                    handler()
+            else:
+                self.console.print("[red]Invalid choice. Please try again.[/red]")
+            
+            if input("\nReturn to main menu? (y/n): ").lower() != 'y':
+                break
+        
+        self.console.print("[bold blue]Thank you for using SMHI Multi-Service Terminal UI![/bold blue]")
+
+class MeteorologicalObservations(SMHIBaseService):
+    """Your existing meteorological observations class"""
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://opendata-download-metobs.smhi.se/api"
+        self.parameters = {
+            "1": {"name": "Lufttemperatur momentanvärde, 1 gång/tim", "id": "2", "unit": "°C", "description": "Temperature"},
+            "2": {"name": "Lufttryck reducerat havsytans nivå", "id": "9", "unit": "hPa", "description": "Air pressure"},
+            "3": {"name": "Relativ Luftfuktighet momentanvärde, 1 gång/tim", "id": "6", "unit": "%", "description": "Relative humidity"},
+            "4": {"name": "Nederbördsmängd summa 1 timme, 1 gång/tim", "id": "7", "unit": "mm", "description": "Precipitation amount"},
+            "5": {"name": "Vindhastighet medelvärde 10 min, 1 gång/tim", "id": "4", "unit": "m/s", "description": "Wind speed"}
+        }
+        self.period_types = ["latest-hour", "latest-day", "latest-months"]
         self.load_favorites()  # Load any saved favorites
 
     def save_favorites(self):
@@ -325,7 +422,210 @@ class SwedenWeatherUI:
                 break
         
         self.console.print("[bold blue]Thank you for using Sweden Weather Terminal UI![/bold blue]")
+class MeteorologicalForecasts(SMHIBaseService):
+    """Handle meteorological forecasts"""
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://opendata-download-metfcst.smhi.se/api"
+
+    async def get_forecast(self, lat: float, lon: float) -> Dict:
+        url = f"{self.base_url}/category/pmp3g/version/2/geotype/point/lon/{lon}/lat/{lat}/data.json"
+        return self.fetch_data(url)
+
+class OceanographicData(SMHIBaseService):
+    """Handle oceanographic observations"""
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://opendata-download-ocobs.smhi.se/api"
+
+    def get_stations(self) -> List[Dict]:
+        url = f"{self.base_url}/version/latest/parameter/1.json"
+        data = self.fetch_data(url)
+        return data.get("station", [])
+class MeteorologicalAnalysis(SMHIBaseService):
+    """Handle MESAN meteorological analysis data"""
+    def __init__(self):
+        super().__init__()
+        self.base_url = "https://opendata-download-metanalys.smhi.se/api"
+        self.parameters = {
+            "1": {"name": "t", "description": "Temperature", "unit": "°C", "level_type": "hl", "level": 2},
+            "2": {"name": "gust", "description": "Wind gust", "unit": "m/s", "level_type": "hl", "level": 10},
+            "3": {"name": "r", "description": "Relative humidity", "unit": "%", "level_type": "hl", "level": 2},
+            "4": {"name": "msl", "description": "Air pressure", "unit": "hPa", "level_type": "hmsl", "level": 0},
+            "5": {"name": "vis", "description": "Visibility", "unit": "km", "level_type": "hl", "level": 2},
+            "6": {"name": "ws", "description": "Wind speed", "unit": "m/s", "level_type": "hl", "level": 10},
+            "7": {"name": "wd", "description": "Wind direction", "unit": "degree", "level_type": "hl", "level": 10}
+        }
+
+    async def get_analysis(self, lat: float, lon: float) -> Dict:
+        """Get meteorological analysis for specific coordinates"""
+        url = f"{self.base_url}/category/mesan2g/version/1/geotype/point/lon/{lon}/lat/{lat}/data.json"
+        return self.fetch_data(url)
+
+    def format_analysis_data(self, data: Dict, parameter: str) -> List[Dict]:
+        """Format analysis data for display"""
+        formatted_data = []
+        param_info = self.parameters[parameter]
+        param_name = param_info["name"]
+        
+        for time_series in data.get("timeSeries", []):
+            timestamp = datetime.fromisoformat(time_series["validTime"].replace('Z', '+00:00'))
+            
+            # Find the parameter in the time series
+            param_data = next(
+                (p for p in time_series["parameters"] if p["name"] == param_name),
+                None
+            )
+            
+            if param_data:
+                value = param_data["values"][0]
+                formatted_data.append({
+                    "timestamp": timestamp,
+                    "value": value,
+                    "unit": param_info["unit"]
+                })
+                
+        return formatted_data
+
+    def display_parameters(self) -> Optional[str]:
+        """Display available parameters and get user selection"""
+        table = Table(title="Available Analysis Parameters")
+        table.add_column("Option", justify="right", style="cyan")
+        table.add_column("Parameter", style="green")
+        table.add_column("Description", style="yellow")
+        table.add_column("Unit", style="blue")
+        
+        for key, param_data in self.parameters.items():
+            table.add_row(
+                key,
+                param_data["name"],
+                param_data["description"],
+                param_data["unit"]
+            )
+            
+        self.console.print(table)
+        
+        choice = input("\nSelect a parameter (1-7) or 'q' to quit: ")
+        return None if choice.lower() == 'q' else choice
+
+    async def run_analysis(self):
+            """Main analysis interface"""
+            self.console.print("[bold blue]SMHI Meteorological Analysis (MESAN)[/bold blue]")
+            
+            # Get location
+            location_util = LocationUtil()
+            try:
+                lat, lon = await location_util.get_location()
+            except Exception as e:
+                self.console.print(f"[red]Error getting location: {str(e)}[/red]")
+                return
+
+            # Get parameter choice
+            choice = self.display_parameters()
+            if choice is None:
+                return
+
+            if choice not in self.parameters:
+                self.console.print("[red]Invalid parameter choice.[/red]")
+                return
+
+            # Fetch and display data
+            try:
+                with Progress() as progress:
+                    task = progress.add_task("[cyan]Fetching analysis data...", total=None)
+                    data = await self.get_analysis(lat, lon)
+
+                if data:
+                    formatted_data = self.format_analysis_data(data, choice)
+                    
+                    if formatted_data:
+                        self.console.print(f"\n[bold green]Analysis Results for {self.parameters[choice]['description']}[/bold green]")
+                        self.console.print(f"[yellow]Location:[/yellow] {lat}°N, {lon}°E")
+                        self.console.print(f"[yellow]Reference Time:[/yellow] {data['referenceTime']}")
+                        self.console.print(f"[yellow]Approved Time:[/yellow] {data['approvedTime']}")
+                        
+                        # Create table for results
+                        results_table = Table(title="Analysis Results")
+                        results_table.add_column("Time", style="cyan")
+                        results_table.add_column("Value", style="green")
+                        results_table.add_column("Unit", style="blue")
+                        
+                        for item in formatted_data:
+                            results_table.add_row(
+                                item["timestamp"].strftime("%Y-%m-%d %H:%M"),
+                                f"{item['value']:.1f}",
+                                item["unit"]
+                            )
+                        
+                        self.console.print(results_table)
+                    else:
+                        self.console.print("[yellow]No data available for the selected parameter.[/yellow]")
+                else:
+                    self.console.print("[red]No analysis data available for this location.[/red]")
+                    
+            except Exception as e:
+                self.console.print(f"[red]Error getting analysis data: {str(e)}[/red]")
+class LocationUtil:
+    """Utility class for handling location data"""
+    def __init__(self):
+        self.console = Console()
+
+    async def get_location(self) -> tuple[float, float]:
+        """Get location either automatically or manually"""
+        self.console.print("\n[bold]Location Input[/bold]")
+        choice = input("Would you like to: \n1. Get location automatically\n2. Enter location manually\nChoice (1/2): ")
+
+        if choice == "1":
+            try:
+                lat, lon = await self.get_automatic_location()
+                self.console.print(f"[green]Located at: {lat}°N, {lon}°E[/green]")
+                if input("Use this location? (y/n): ").lower() != 'y':
+                    return await self.get_manual_location()
+                return lat, lon
+            except Exception as e:
+                self.console.print(f"[yellow]Could not get automatic location: {str(e)}[/yellow]")
+                self.console.print("[yellow]Falling back to manual input...[/yellow]")
+                return await self.get_manual_location()
+        else:
+            return await self.get_manual_location()
+
+    async def get_automatic_location(self) -> tuple[float, float]:
+        """Get location automatically using IP-based geolocation"""
+        try:
+            with Progress() as progress:
+                task = progress.add_task("[cyan]Getting location...", total=None)
+                response = requests.get('https://ipapi.co/json/')
+                response.raise_for_status()
+                data = response.json()
+                
+                # Extract coordinates
+                lat = float(data.get('latitude', 0))
+                lon = float(data.get('longitude', 0))
+                
+                if lat == 0 and lon == 0:
+                    raise ValueError("Could not determine location")
+                    
+                return lat, lon
+        except Exception as e:
+            raise Exception(f"Error getting automatic location: {str(e)}")
+
+    async def get_manual_location(self) -> tuple[float, float]:
+        """Get location through manual input"""
+        while True:
+            try:
+                lat = float(input("Enter latitude (-90 to 90, e.g. 57.694660): "))
+                if not -90 <= lat <= 90:
+                    raise ValueError("Latitude must be between -90 and 90")
+                
+                lon = float(input("Enter longitude (-180 to 180, e.g. 11.979730): "))
+                if not -180 <= lon <= 180:
+                    raise ValueError("Longitude must be between -180 and 180")
+                
+                return lat, lon
+            except ValueError as e:
+                self.console.print(f"[red]Invalid input: {str(e)}[/red]")
+                continue
 
 if __name__ == "__main__":
-    weather_ui = SwedenWeatherUI()
-    weather_ui.run()
+    service = SMHIMultiService()
+    asyncio.run(service.run())
